@@ -1995,7 +1995,7 @@ def show_cursor():
     sys.stdout.write("\033[?25h")
 
 
-BANNER_TEXT = "   6 ASCII crabs with AI-evolved trading instincts! each crab has its own solana wallet and trades on-chain via jupiter. their strategies were evolved by OpenEvolve -- smart dip buying, dynamic stop-losses, volatility-adjusted sizing, and momentum spike selling. live leaderboard tracks who's winning.   ///   $PINCHIN   ///   "
+BANNER_TEXT = "   6 ASCII crabs with AI-evolved trading instincts! each crab has its own solana wallet and trades on-chain via jupiter. their strategies were evolved by OpenEvolve -- smart dip buying, dynamic stop-losses, volatility-adjusted sizing, and momentum spike selling. live leaderboard tracks who's winning.   ///   $PINCHIN   ///   github.com/SAMBAS123/pinchin-crabs   ///   "
 
 def draw(crabs, swimmers, width, height, tick_count, desk_x, desk_y, dealer_x, dealer_y, price_data=None, is_night=False, girlfriends=None, bpm=0, bpm_input=None, chat_msgs=None, auto_trader=None, poll_display=None):
     grid = [[" "] * width for _ in range(height)]
