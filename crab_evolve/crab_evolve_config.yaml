@@ -1,0 +1,66 @@
+# OpenEvolve config for Crab Trading Strategy Evolution
+# 6 islands = 6 crabs, each evolving their own personality
+
+max_iterations: 100
+checkpoint_interval: 10
+log_level: "INFO"
+
+diff_based_evolution: true
+allow_full_rewrites: false
+max_code_length: 8000
+
+# LLM config - uses litellm proxy to reach Claude
+# Start proxy: litellm --model anthropic/claude-sonnet-4-20250514 --port 4000
+# Or use OpenRouter: https://openrouter.ai/api/v1
+llm:
+  models:
+    - name: "anthropic/claude-sonnet-4-20250514"
+      weight: 0.7
+    - name: "anthropic/claude-haiku-4-5-20251001"
+      weight: 0.3
+  api_base: "http://localhost:4000/v1"
+  api_key: null  # Uses OPENAI_API_KEY env var (set to your litellm/openrouter key)
+  temperature: 0.7
+  top_p: 0.95
+  max_tokens: 4096
+  timeout: 60
+  retries: 3
+  retry_delay: 5
+
+prompt:
+  system_message: >
+    You are an expert quantitative trader and Python programmer.
+    You are evolving a trading strategy for a crab simulation that trades
+    the $PINCHIN memecoin on Solana. The strategy receives market sensor
+    data and must return buy/sell/hold decisions with position sizing.
+    Focus on risk management, avoiding drawdowns, and consistent profits.
+    The strategy trades a volatile memecoin so be adaptive to rapid price
+    movements. Avoid degenerate strategies like always-hold or always-buy.
+  num_top_programs: 3
+  num_diverse_programs: 2
+  use_template_stochasticity: true
+
+# 6 islands = 6 crab personalities
+database:
+  population_size: 60
+  archive_size: 20
+  num_islands: 6
+  migration_interval: 20
+  migration_rate: 0.15
+  elite_selection_ratio: 0.15
+  exploration_ratio: 0.25
+  exploitation_ratio: 0.60
+  feature_dimensions:
+    - "combined_score"
+    - "activity_score"
+  feature_bins: 10
+
+evaluator:
+  timeout: 120
+  max_retries: 2
+  cascade_evaluation: true
+  cascade_thresholds:
+    - 0.3   # Stage 1: must beat baseline "always hold"
+    - 0.5   # Stage 2: must show real trading ability
+  parallel_evaluations: 2
+  use_llm_feedback: false

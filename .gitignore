@@ -1,0 +1,25 @@
+# Ignore everything by default (this is a home directory)
+*
+
+# Only include crab sim project files
+!.gitignore
+!crab_sim.py
+!run_evolution.py
+!requirements.txt
+!crabs.bat
+!pinchin_chat_bridge.user.js
+!README.md
+
+# crab_evolve module
+!crab_evolve/
+!crab_evolve/*.py
+!crab_evolve/*.yaml
+crab_evolve/__pycache__/
+crab_evolve/openevolve_output/
+
+# Never commit secrets/keys
+*.env
+*keys*.json
+*positions*.json
+__pycache__/
+*.pyc
