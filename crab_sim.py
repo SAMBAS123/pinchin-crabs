@@ -534,8 +534,10 @@ JITO_BUNDLE_URL = "https://mainnet.block-engine.jito.wtf/api/v1/bundles"
 JITO_MAX_BUNDLE = 5        # Max txs per Jito bundle
 PP_BUY_SLIPPAGE = 25       # 25% — aggressive for pump.fun sniping
 PP_BUY_TIP = 0.0001        # SOL priority fee (was 0.001 — 10x too high for RPC fallback)
-PP_SELL_SLIPPAGE = [25, 40, 60]  # Escalating % per retry
-PP_SELL_TIP = [0.0003, 0.001, 0.003]  # SOL priority fee — escalates with retries
+PP_SELL_SLIPPAGE = 5              # Fixed 5% (500 bps) exit slippage
+PP_SELL_TIP = [0.00005, 0.0001, 0.0005, 0.001]  # SOL priority fee — escalates with retries
+SELL_PRIORITY_LAMPORTS = ["auto", 50_000, 100_000, 500_000, 1_000_000]  # Jupiter priority fee escalation
+SELL_MAX_RETRIES = 5
 
 EVOLVED_STRATEGY_PATH = os.path.expanduser("~/.pinchin_evolved_strategy.py")
 EVOLVED_RELOAD_INTERVAL = 60  # seconds between hot-reload checks
@@ -1256,7 +1258,7 @@ class AutoTrader:
             self._log_trade(crab_name, mint, "BUY_FAIL", f"err: {str(e)[:40]}")
 
     def _execute_sell(self, crab_name, mint, token_amount, reason="SELL"):
-        """Sell via PumpPortal+Jito (primary) or Jupiter (fallback). 3 retries with escalating slippage."""
+        """Sell via PumpPortal (primary) or Jupiter (fallback). 5 retries with escalating priority fees."""
         if mint in BLACKLISTED_TOKENS:
             _debug_log.info(f"  SELL blocked: {mint[:8]} is blacklisted")
             return
@@ -1267,14 +1269,14 @@ class AutoTrader:
             kp = self.keypairs[crab_name]
             pubkey = str(kp.pubkey())
             sol_received = 0
-            _debug_log.info(f"--- SELL {crab_name} ${APPROVED_TOKENS.get(mint, mint[:8])} {reason} ---")
+            ticker = APPROVED_TOKENS.get(mint, mint[:8])
+            _debug_log.info(f"--- SELL {crab_name} ${ticker} {reason} | {token_amount} tokens | {SELL_MAX_RETRIES} retries ---")
 
             # Pre-flight: check SOL balance — need enough for tx fees
             if self.wallet_feed and crab_name in CRAB_WALLETS:
                 sol_bal = self.wallet_feed.get_balance(CRAB_WALLETS[crab_name])
                 if sol_bal < 0.003:
                     _debug_log.warning(f"  SELL SKIP {crab_name}: only {sol_bal:.4f} SOL, need ~0.003 for fees")
-                    # Still mark sell_fails so stale cleanup can detect
                     with self._lock:
                         pos = self.positions.get(crab_name, {}).get(mint)
                         if pos:
@@ -1282,55 +1284,55 @@ class AutoTrader:
                             self.save_positions()
                     return
 
-            for attempt in range(3):
-                # Slippage: PINCHIN 3%, snipes use PP_SELL_SLIPPAGE escalation
-                if mint == PINCHIN_CONTRACT:
-                    pp_slip = 3
-                    jup_slip_bps = 300
-                else:
-                    pp_slip = PP_SELL_SLIPPAGE[min(attempt, len(PP_SELL_SLIPPAGE) - 1)]
-                    jup_slip_bps = pp_slip * 100
+            # Fixed 500 bps (5%) exit slippage for all sells
+            pp_slip = PP_SELL_SLIPPAGE
+            jup_slip_bps = pp_slip * 100  # 500
 
-                # Priority fee escalates with each attempt
+            for attempt in range(SELL_MAX_RETRIES):
+                # Priority fee escalates: auto, 50K, 100K, 500K, 1M lamports
+                jup_priority = SELL_PRIORITY_LAMPORTS[min(attempt, len(SELL_PRIORITY_LAMPORTS) - 1)]
                 pp_tip = PP_SELL_TIP[min(attempt, len(PP_SELL_TIP) - 1)]
+
+                fee_label = f"{jup_priority}" if jup_priority == "auto" else f"{jup_priority:,} lamports"
+                _debug_log.info(f"  SELL attempt {attempt+1}/{SELL_MAX_RETRIES} | slip={jup_slip_bps}bps | priority={fee_label}")
 
                 try:
                     tx_sig = None
+                    path_used = "none"
 
-                    # --- PumpPortal + Jito primary path ---
-                    try:
-                        resp_body = self._pp_request({
-                            "publicKey": pubkey,
-                            "action": "sell",
-                            "mint": mint,
-                            "denominatedInSol": "false",
-                            "amount": str(token_amount),
-                            "slippage": pp_slip,
-                            "priorityFee": pp_tip,
-                            "pool": "auto",
-                        })
+                    # --- PumpPortal primary path (pump.fun tokens only) ---
+                    is_pump = mint.endswith("pump")
+                    if is_pump:
                         try:
-                            encoded_tx = resp_body.decode("utf-8").strip().strip('"')
-                        except UnicodeDecodeError:
-                            encoded_tx = b58.b58encode(resp_body).decode()
-                        raw = b58.b58decode(encoded_tx)
-                        unsigned = VersionedTransaction.from_bytes(raw)
-                        signed = VersionedTransaction(unsigned.message, [kp])
-                        encoded_signed = b58.b58encode(bytes(signed)).decode()
-                        tx_sig = str(signed.signatures[0])
-
-                        # Send directly via RPC (skip Jito — consistently 429)
-                        is_pump = mint.endswith("pump")
-                        if is_pump:
-                            rpc_sig = self._send_tx(signed)
-                            tx_sig = rpc_sig if rpc_sig else None
-                        else:
-                            # Non-pump: skip PP, fall through to Jupiter
+                            resp_body = self._pp_request({
+                                "publicKey": pubkey,
+                                "action": "sell",
+                                "mint": mint,
+                                "denominatedInSol": "false",
+                                "amount": str(token_amount),
+                                "slippage": pp_slip,
+                                "priorityFee": pp_tip,
+                                "pool": "auto",
+                            })
+                            try:
+                                encoded_tx = resp_body.decode("utf-8").strip().strip('"')
+                            except UnicodeDecodeError:
+                                encoded_tx = b58.b58encode(resp_body).decode()
+                            raw = b58.b58decode(encoded_tx)
+                            unsigned = VersionedTransaction.from_bytes(raw)
+                            signed = VersionedTransaction(unsigned.message, [kp])
+                            rpc_sig = self._send_tx(signed, skip_preflight=True)
+                            if rpc_sig:
+                                tx_sig = rpc_sig
+                                path_used = "PumpPortal"
+                                _debug_log.info(f"    PP sent: {tx_sig[:16]}...")
+                            else:
+                                _debug_log.info(f"    PP send returned no sig, falling through to Jupiter")
+                        except Exception as pp_err:
+                            _debug_log.info(f"    PP failed: {str(pp_err)[:40]}, falling through to Jupiter")
                             tx_sig = None
-                    except Exception:
-                        tx_sig = None
 
-                    # --- Jupiter fallback if PumpPortal failed ---
+                    # --- Jupiter fallback (or primary for non-pump tokens) ---
                     if not tx_sig:
                         headers = self._jup_headers()
                         quote_url = (
@@ -1344,10 +1346,12 @@ class AutoTrader:
 
                         out_lamports = int(quote.get("outAmount", 0))
                         if out_lamports <= 0:
+                            _debug_log.warning(f"    Jupiter: no route (try {attempt+1})")
                             self._log_trade(crab_name, mint, "SELL_FAIL", f"no route (try {attempt+1})")
-                            time.sleep(5)
+                            time.sleep(3)
                             continue
                         sol_received = out_lamports / 1_000_000_000
+                        _debug_log.info(f"    Jupiter quote: ~{sol_received:.4f} SOL")
 
                         swap_headers = dict(headers)
                         swap_headers["Content-Type"] = "application/json"
@@ -1355,7 +1359,7 @@ class AutoTrader:
                             "quoteResponse": quote,
                             "userPublicKey": pubkey,
                             "wrapAndUnwrapSol": True,
-                            "prioritizationFeeLamports": "auto",
+                            "prioritizationFeeLamports": jup_priority,
                         }).encode()
                         req2 = urllib.request.Request(JUPITER_SWAP_URL, data=swap_payload, headers=swap_headers)
                         with urllib.request.urlopen(req2, timeout=15) as resp2:
@@ -1363,22 +1367,29 @@ class AutoTrader:
 
                         swap_tx_b64 = swap_data.get("swapTransaction")
                         if not swap_tx_b64:
+                            _debug_log.warning(f"    Jupiter: no swap tx (try {attempt+1})")
                             self._log_trade(crab_name, mint, "SELL_FAIL", f"no swap tx (try {attempt+1})")
-                            time.sleep(5)
+                            time.sleep(3)
                             continue
 
                         raw_tx = base64.b64decode(swap_tx_b64)
                         tx = VersionedTransaction.from_bytes(raw_tx)
                         signed_tx = VersionedTransaction(tx.message, [kp])
-                        tx_sig = self._send_tx(signed_tx)
+                        tx_sig = self._send_tx(signed_tx, skip_preflight=True)
+                        path_used = "Jupiter"
+                        if tx_sig:
+                            _debug_log.info(f"    Jupiter sent: {tx_sig[:16]}...")
+                        else:
+                            _debug_log.warning(f"    Jupiter send returned no sig (try {attempt+1})")
 
                     # --- Confirmation (same for both paths) ---
                     if tx_sig:
+                        _debug_log.info(f"    Confirming via {path_used}... (20s timeout)")
                         confirmed = self._confirm_tx(tx_sig, timeout=20)
                         if confirmed:
+                            _debug_log.info(f"    CONFIRMED on attempt {attempt+1} via {path_used}")
                             if sol_received <= 0:
                                 sol_received = self._estimate_sol_received(crab_name, mint)
-                            # Check remaining balance — partial vs full sell
                             time.sleep(1)
                             remaining = self._check_token_balance_rpc(crab_name, mint)
                             if remaining > 0:
@@ -1387,46 +1398,53 @@ class AutoTrader:
                                 self._zero_position(crab_name, mint, reason, tx_sig, sol_received)
                             return
                         elif confirmed is False:
+                            _debug_log.warning(f"    On-chain error (try {attempt+1})")
                             self._log_trade(crab_name, mint, "SELL_FAIL", f"on-chain err (try {attempt+1})")
                             time.sleep(3)
                             continue
                         # Unknown — verify on-chain
+                        _debug_log.info(f"    Timeout — checking on-chain balance...")
                         time.sleep(2)
                         bal = self._check_token_balance_rpc(crab_name, mint)
                         if bal == 0:
+                            _debug_log.info(f"    Verified sold (balance=0) on attempt {attempt+1}")
                             if sol_received <= 0:
                                 sol_received = self._estimate_sol_received(crab_name, mint)
                             self._zero_position(crab_name, mint, reason, tx_sig, sol_received)
                             return
                         elif bal > 0:
-                            # Check if tokens actually decreased (partial sell landed)
                             orig_tokens = 0
                             with self._lock:
                                 pos = self.positions.get(crab_name, {}).get(mint)
                                 if pos:
                                     orig_tokens = pos.get("tokens", 0)
                             if orig_tokens > 0 and bal < orig_tokens:
+                                _debug_log.info(f"    Partial sell landed: {orig_tokens} -> {bal}")
                                 if sol_received <= 0:
                                     sol_received = self._estimate_sol_received(crab_name, mint)
                                 self._reduce_position(crab_name, mint, reason, tx_sig, sol_received, orig_tokens - bal)
                                 return
+                            _debug_log.warning(f"    Still holding {bal} tokens (try {attempt+1})")
                             self._log_trade(crab_name, mint, "SELL_FAIL", f"still holding (try {attempt+1})")
                             token_amount = bal
                             time.sleep(3)
                             continue
+                        _debug_log.warning(f"    Balance verify error (try {attempt+1})")
                         self._log_trade(crab_name, mint, "SELL_FAIL", f"verify err (try {attempt+1})")
                         time.sleep(3)
                         continue
                     else:
                         self._log_trade(crab_name, mint, "SELL_FAIL", f"no sig (try {attempt+1})")
-                        time.sleep(5)
+                        time.sleep(3)
                         continue
 
                 except Exception as e:
+                    _debug_log.error(f"    Exception on attempt {attempt+1}: {str(e)[:60]}")
                     self._log_trade(crab_name, mint, "SELL_FAIL", f"{str(e)[:30]} (try {attempt+1})")
-                    time.sleep(5)
+                    time.sleep(3)
 
-            # All 3 attempts done — final on-chain balance check
+            # All retries exhausted — final on-chain balance check
+            _debug_log.warning(f"  All {SELL_MAX_RETRIES} sell attempts failed for {crab_name} ${ticker}")
             time.sleep(3)
             bal = self._check_token_balance_rpc(crab_name, mint)
             if bal == 0:
@@ -1441,7 +1459,7 @@ class AutoTrader:
                         pos["tokens"] = bal
                         pos["sell_fails"] = pos.get("sell_fails", 0) + 1
                         self.save_positions()
-                self._log_trade(crab_name, mint, "SELL_RETRY", f"still {bal} tokens, will retry")
+                self._log_trade(crab_name, mint, "SELL_RETRY", f"still {bal} tokens after {SELL_MAX_RETRIES} tries")
             else:
                 with self._lock:
                     pos = self.positions.get(crab_name, {}).get(mint)
